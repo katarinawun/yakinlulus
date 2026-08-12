@@ -2297,6 +2297,13 @@ func (r *repository) CreateExam(ctx context.Context, e *Exam) error {
 		ON CONFLICT (exam_id, name) DO NOTHING`, e.ContentID); err != nil {
 		return err
 	}
+	// Materialize the authored question selection (blueprint subtests'
+	// pool_question_ids) into cbt.exam_package_question so the CBT runtime
+	// can serve them. Authoring writes the ids into the metadata jsonb only;
+	// without this step the session starts empty.
+	if err := r.syncExamPackageQuestions(ctx, tx, e.ContentID, e.Blueprint); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
@@ -2348,6 +2355,17 @@ func (r *repository) UpdateExam(ctx context.Context, contentID uuid.UUID, e *Exa
 			random_option = EXCLUDED.random_option`,
 		contentID, e.ShuffleQuestions, e.ShuffleOptions)
 	if err != nil {
+		return err
+	}
+	// Keep the authored question selection in sync (blueprint subtests'
+	// pool_question_ids -> cbt.exam_package_question) so the CBT runtime can
+	// serve them; authoring writes the ids into metadata jsonb only.
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO cbt.exam_package (exam_id, name) VALUES ($1, 'default')
+		ON CONFLICT (exam_id, name) DO NOTHING`, contentID); err != nil {
+		return err
+	}
+	if err := r.syncExamPackageQuestions(ctx, tx, contentID, e.Blueprint); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -2463,6 +2481,79 @@ func (r *repository) AddExamQuestion(ctx context.Context, eq *ExamQuestion) erro
 	eq.DisplayOrder = nextOrder
 	eq.CreatedAt = created
 	return tx.Commit(ctx)
+}
+
+// syncExamPackageQuestions materializes the authored question selection into
+// cbt.exam_package_question for the exam's default package. The admin Studio
+// stores selected questions as blueprint.subtests[].pool_question_ids in the
+// exam metadata jsonb; the CBT runtime reads cbt.exam_package_question, so the
+// ids must be copied over on create/update. Existing links are preserved and
+// newly added ids are appended (no deletion) so the flow is additive.
+func (r *repository) syncExamPackageQuestions(ctx context.Context, tx pgx.Tx, examID uuid.UUID, blueprint map[string]interface{}) error {
+	if len(blueprint) == 0 {
+		return nil
+	}
+	raw, ok := blueprint["subtests"]
+	if !ok {
+		return nil
+	}
+	subtests, ok := raw.([]interface{})
+	if !ok {
+		return nil
+	}
+
+	var packageID uuid.UUID
+	if err := tx.QueryRow(ctx, `
+		SELECT id FROM cbt.exam_package WHERE exam_id = $1 AND name = 'default'`, examID).Scan(&packageID); err != nil {
+		return err
+	}
+
+	nextOrder := 0
+	_ = tx.QueryRow(ctx, `SELECT COALESCE(MAX(question_order) + 1, 0) FROM cbt.exam_package_question WHERE package_id = $1`, packageID).Scan(&nextOrder)
+
+	seen := map[uuid.UUID]bool{}
+	var toInsert []uuid.UUID
+	for _, st := range subtests {
+		m, ok := st.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		rawIDs, ok := m["pool_question_ids"]
+		if !ok {
+			continue
+		}
+		ids, ok := rawIDs.([]interface{})
+		if !ok {
+			continue
+		}
+		for _, v := range ids {
+			s, ok := v.(string)
+			if !ok {
+				continue
+			}
+			id, err := uuid.Parse(s)
+			if err != nil || seen[id] {
+				continue
+			}
+			seen[id] = true
+			toInsert = append(toInsert, id)
+		}
+	}
+	if len(toInsert) == 0 {
+		return nil
+	}
+
+	for _, id := range toInsert {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO cbt.exam_package_question (package_id, question_id, question_order, score)
+			VALUES ($1, $2, $3, 0)
+			ON CONFLICT (package_id, question_id) DO NOTHING`,
+			packageID, id, nextOrder); err != nil {
+			return err
+		}
+		nextOrder++
+	}
+	return nil
 }
 
 func (r *repository) RemoveExamQuestion(ctx context.Context, examContentID, questionContentID uuid.UUID) error {

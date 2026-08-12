@@ -84,11 +84,13 @@ export default function ExamInstructionsPage() {
     const durationMinutes = pkg?.duration_minutes ?? 0;
     const passingScore = pkg?.passing_score;
 
+    const startExamId = pkg?.subjects?.[0]?.exam_content_id || id;
+
     const handleStart = async () => {
         setStarting(true);
         setStartError(null);
         try {
-            const session = await academicService.startCBTExam(id);
+            const session = await academicService.startCBTExam(startExamId);
             if (session && session.id) {
                 router.push(`/exams/${id}/cbt?session_id=${session.id}`);
             } else {

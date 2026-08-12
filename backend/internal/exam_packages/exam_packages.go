@@ -17,14 +17,17 @@ import (
 // ---- Models ----
 
 type ExamPackage struct {
-	ID             uuid.UUID  `json:"id"`
-	Code           string     `json:"code"`
-	Name           string     `json:"name"`
-	EducationLevel string     `json:"education_level"`
-	GradeID        *uuid.UUID `json:"grade_id,omitempty"`
-	IsActive       bool       `json:"is_active"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	ID              uuid.UUID  `json:"id"`
+	Code            string     `json:"code"`
+	Name            string     `json:"name"`
+	EducationLevel  string     `json:"education_level"`
+	GradeID         *uuid.UUID `json:"grade_id,omitempty"`
+	IsActive        bool       `json:"is_active"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	SubjectsCount   int        `json:"subjects_count"`
+	TotalQuestions  int        `json:"total_questions"`
+	DurationMinutes int        `json:"duration_minutes"`
 }
 
 type PackageExam struct {
@@ -88,12 +91,15 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
 }
 
-const pkgCols = `id, code, name, education_level, grade_id, is_active, created_at, updated_at`
+const pkgCols = `v.id, v.code, v.name, v.education_level, v.grade_id, v.is_active, v.created_at, v.updated_at,
+	(SELECT COUNT(*) FROM cms.exam_package_exams pe WHERE pe.package_id = v.id) AS subjects_count,
+	(SELECT COUNT(*) FROM cbt.exam_package_question pq JOIN cbt.exam_package p ON p.id = pq.package_id WHERE p.exam_id = ep.exam_id) AS total_questions,
+	COALESCE((SELECT duration_minute FROM cbt.exam_metadata md WHERE md.exam_id = ep.exam_id), 0) AS duration_minutes`
 
 func scanPackage(row pgx.Row) (*ExamPackage, error) {
 	var p ExamPackage
 	var gradeID *uuid.UUID
-	err := row.Scan(&p.ID, &p.Code, &p.Name, &p.EducationLevel, &gradeID, &p.IsActive, &p.CreatedAt, &p.UpdatedAt)
+	err := row.Scan(&p.ID, &p.Code, &p.Name, &p.EducationLevel, &gradeID, &p.IsActive, &p.CreatedAt, &p.UpdatedAt, &p.SubjectsCount, &p.TotalQuestions, &p.DurationMinutes)
 	if err != nil {
 		return nil, err
 	}
@@ -102,13 +108,13 @@ func scanPackage(row pgx.Row) (*ExamPackage, error) {
 }
 
 func (r *Repository) List(ctx context.Context, level string) ([]ExamPackage, error) {
-	query := `SELECT ` + pkgCols + ` FROM cms.exam_packages`
+	query := `SELECT ` + pkgCols + ` FROM cms.exam_packages v JOIN cbt.exam_package ep ON ep.id = v.id`
 	args := []interface{}{}
 	if level != "" {
-		query += ` WHERE education_level = $1`
+		query += ` WHERE v.education_level = $1`
 		args = append(args, level)
 	}
-	query += ` ORDER BY name`
+	query += ` ORDER BY v.name`
 	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -126,7 +132,7 @@ func (r *Repository) List(ctx context.Context, level string) ([]ExamPackage, err
 }
 
 func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*ExamPackage, error) {
-	return scanPackage(r.pool.QueryRow(ctx, `SELECT `+pkgCols+` FROM cms.exam_packages WHERE id = $1`, id))
+	return scanPackage(r.pool.QueryRow(ctx, `SELECT `+pkgCols+` FROM cms.exam_packages v JOIN cbt.exam_package ep ON ep.id = v.id WHERE v.id = $1`, id))
 }
 
 func (r *Repository) Create(ctx context.Context, req SavePackageRequest) (*ExamPackage, error) {
@@ -398,16 +404,19 @@ func (h *Handler) Get(c *fiber.Ctx) error {
 		subjects[0].DisplayOrder = 1
 	}
 	return c.JSON(shared.Success(fiber.Map{
-		"id":             pkg.ID,
-		"code":           pkg.Code,
-		"name":           pkg.Name,
+		"id":              pkg.ID,
+		"code":            pkg.Code,
+		"name":            pkg.Name,
 		"education_level": pkg.EducationLevel,
-		"grade_id":       pkg.GradeID,
-		"is_active":      pkg.IsActive,
-		"created_at":     pkg.CreatedAt,
-		"updated_at":     pkg.UpdatedAt,
-		"subjects":       subjects,
-		"package_mode":   "SINGLE",
+		"grade_id":        pkg.GradeID,
+		"is_active":       pkg.IsActive,
+		"created_at":      pkg.CreatedAt,
+		"updated_at":      pkg.UpdatedAt,
+		"subjects_count":  len(subjects),
+		"total_questions": pkg.TotalQuestions,
+		"duration_minutes": pkg.DurationMinutes,
+		"subjects":        subjects,
+		"package_mode":    "SINGLE",
 	}))
 }
 

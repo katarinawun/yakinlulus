@@ -1190,6 +1190,31 @@ func (r *Repository) PickRandomExamQuestions(ctx context.Context, examID uuid.UU
 	return ids, rows.Err()
 }
 
+// PickAllPackageQuestions returns every question authored for the exam
+// (cbt.exam_package_question across its packages) in display order. Used as a
+// fallback when an exam has no pool config / questions_per_student.
+func (r *Repository) PickAllPackageQuestions(ctx context.Context, examID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT epq.question_id
+		FROM cbt.exam_package_question epq
+		JOIN cbt.exam_package ep ON ep.id = epq.package_id
+		WHERE ep.exam_id = $1
+		ORDER BY epq.question_order, epq.created_at`, examID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func (r *Repository) FindExpiredActiveSessions(ctx context.Context) ([]struct {
 	ID               uuid.UUID
 	ExamID           uuid.UUID
@@ -1306,6 +1331,7 @@ func (s *Service) Start(ctx context.Context, examID, userID uuid.UUID) (*ExamSes
 	}
 
 	// Check if exam has a question pool - if so, generate session questions
+	addedQuestions := false
 	pool, err := s.repo.GetQuestionPool(ctx, examID)
 	if err == nil && pool != nil {
 		questionIDs, err := s.repo.SelectQuestionsForSession(ctx, pool)
@@ -1317,6 +1343,7 @@ func (s *Service) Start(ctx context.Context, examID, userID uuid.UUID) (*ExamSes
 			if err != nil {
 				return nil, err
 			}
+			addedQuestions = true
 		}
 		return session, nil
 	}
@@ -1327,6 +1354,18 @@ func (s *Service) Start(ctx context.Context, examID, userID uuid.UUID) (*ExamSes
 		questionIDs, qErr := s.repo.PickRandomExamQuestions(ctx, examID, qps)
 		if qErr == nil && len(questionIDs) > 0 {
 			if err := s.repo.AddSessionQuestions(ctx, session.ID, questionIDs, true, true); err != nil {
+				return nil, err
+			}
+			addedQuestions = true
+		}
+	}
+
+	// Final fallback: the exam has no pool config and no questions_per_student,
+	// so serve the exam's full authored question set (cbt.exam_package_question).
+	if !addedQuestions {
+		ids, pErr := s.repo.PickAllPackageQuestions(ctx, examID)
+		if pErr == nil && len(ids) > 0 {
+			if err := s.repo.AddSessionQuestions(ctx, session.ID, ids, true, true); err != nil {
 				return nil, err
 			}
 		}

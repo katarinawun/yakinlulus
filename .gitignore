@@ -57,3 +57,5 @@ D:\Project\EdTech\Yakinlulus.id\Hierarki Mapel
 D:\Project\EdTech\Yakinlulus.id\.superpowers
 D:\Project\EdTech\Yakinlulus.id\.agents
 D:\Project\EdTech\Yakinlulus.id\doc
+# Server runtime logs
+backend/server-*.log
